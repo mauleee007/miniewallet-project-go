@@ -1,6 +1,6 @@
 # Product Requirement Document (PRD) & Technical Specification
 **Project Name:** Mini E-Wallet & Distributed Transfer System (MiniWallet)  
-**Document Version:** 1.0.0 (Final & Approved)  
+**Document Version:** 1.1.0 (Bab 8 Persyaratan Desain Sistem ditambahkan)  
 **Status:** Locked for Development  
 **Target Architecture:** Microservices, Event-Driven, Distributed Locking  
 
@@ -89,9 +89,15 @@ Membangun sistem *core backend* dompet digital berskala *enterprise* yang mampu 
 * **Lingkungan Eksekusi:** Harus bisa dijalankan sepenuhnya di dalam **Docker Container** (Linux Alpine/Ubuntu based) secara terisolasi tanpa menginstal *tool* database secara manual di OS lokal.
 
 ### Standar Kinerja & Keamanan
+* **Data Consistency (ACID Transactions):** Saldo tidak boleh salah. Menggunakan fitur *Database Transactions* (`BEGIN`, `COMMIT`, `ROLLBACK`) di MySQL. Jika pengguna mentransfer uang, saldo pengirim berkurang dan saldo penerima bertambah dalam satu waktu bersamaan. Jika salah satu gagal, seluruh rangkaian transaksi dibatalkan (*rollback*) agar tidak ada uang yang hilang secara gaib.
 * **Keamanan Konkurensi:** Tahan terhadap pengujian *Load Testing* (Apache Bench / k6) dengan 100 *request* transfer bersamaan pada 1 akun tanpa menyebabkan saldo minus (*zero race condition*).
-* **Idempotency:** Setiap transaksi memiliki `reference_id` unik untuk mencegah pemrosesan ganda akibat gangguan jaringan.
-* **Password Storage:** Wajib menggunakan algoritma *hashing* `bcrypt` dengan *cost* minimal 10.
+* **Idempotency (Anti-Double Transaction):** Aplikasi klien (seperti Flutter) wajib membuat `Idempotency-Key` (UUID unik) dan mengirimkannya di HTTP Header untuk mencegah pemrosesan ganda saat koneksi labil atau *auto-retry*. Backend mengecek kunci ini; jika sudah pernah diproses, backend mengembalikan baris transaksi yang sama tanpa memotong saldo untuk kedua kalinya.
+* **Security (Keamanan Berlapis):**
+  - **Authentication & PIN Authorization:** JWT untuk sesi login, ditambah dengan wajib memasukkan/verifikasi **PIN** saat mengeksekusi transfer.
+  - **Secure Storage Klien:** Klien (misal: aplikasi Flutter) dilarang menyimpan token JWT/data sensitif di *shared preferences* biasa. Wajib menggunakan *secure storage* yang memanfaatkan *Keychain (iOS)* atau *Keystore (Android)*.
+  - **HTTPS/TLS:** Seluruh komunikasi klien dan backend wajib menggunakan enkripsi HTTPS untuk mencegah penyadapan (*Man-in-the-Middle attack*).
+  - **Password Storage:** Algoritma *hashing* `bcrypt` dengan *cost* minimal 10.
+* **Audit Trail / Logging Transaksi yang Ketat:** Setiap perubahan saldo bersifat *immutable* (tidak bisa diubah/dihapus). Dilarang mengubah saldo langsung di memori/tabel tanpa membuat baris riwayat baru di tabel `transactions` (ledger) yang berisi `user_id`, `amount`, `transaction_type` (debit/kredit), dan `status` (pending/success/failed).
 
 ---
 
@@ -128,3 +134,23 @@ Sistem dipecah menjadi 3 layanan terisolasi yang berkomunikasi dalam jaringan Do
 1. **`auth-service`**: Mengelola pengguna, otentikasi, pembuatan token JWT, dan validasi sesi di Redis.
 2. **`wallet-service`**: *Core engine* yang menangani saldo, mutasi, penguncian Redis Lock, transaksi MySQL via GORM, dan *producer* event ke Kafka.
 3. **`notification-service`**: *Background worker* yang bertindak sebagai *consumer* Kafka untuk mencatat log aktivitas dan pengiriman bukti transaksi.
+
+---
+
+## 8. Persyaratan Desain Sistem (System Design Requirements)
+
+Bab ini menerjemahkan standar di Bab 4 menjadi aturan desain yang wajib dipatuhi oleh `wallet-service`.
+
+1. **Data Consistency (ACID Transactions):**
+   - Mutasi potong saldo pengirim, tambah saldo penerima, dan pencatatan ledger wajib berada dalam **satu** *Database Transaction* (`BEGIN`, `COMMIT`, `ROLLBACK`). Jika salah satu langkah gagal, seluruh rangkaian dibatalkan agar tidak ada uang yang hilang atau tercipta di tengah jalan.
+   - Seluruh repository yang ikut dalam satu alur bisnis wajib memakai objek transaksi (`tx`) yang sama.
+2. **Pola Buku Besar (Audit Trail / Ledger Pattern):**
+   - Kolom `balance` pada tabel `wallets` hanyalah representasi instan (*cache*) dari saldo. Kebenaran historis selalu dibuktikan oleh riwayat mutasi pada tabel ledger.
+   - Dilarang mengubah tabel `wallets` tanpa mencatat baris baru di ledger dalam transaksi database yang sama. Baris ledger bersifat *append-only* (tidak boleh di-`UPDATE` / `DELETE`).
+3. **Idempotency (Anti-Double Transaction):**
+   - Setiap request yang memindahkan uang wajib menyertakan header `Idempotency-Key` (UUID dari klien). Nilai ini disimpan sebagai kolom unik (`reference_id`) di database.
+   - Jika key yang sama dikirim ulang (akibat *auto-retry*, lag koneksi, atau tombol "Bayar" ditekan dua kali), backend mengembalikan hasil transaksi sebelumnya tanpa memotong saldo untuk kedua kalinya.
+4. **Security (PIN & HTTPS):**
+   - Komunikasi klien–backend wajib melalui HTTPS (proteksi *Man-in-the-Middle*).
+   - Endpoint yang memindahkan uang wajib dikawal otentikasi JWT **dan** verifikasi PIN tersendiri.
+   - Aplikasi klien wajib menyimpan kredensial di *secure storage* (*Keychain/Keystore*).

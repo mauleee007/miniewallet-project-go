@@ -1,26 +1,55 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"net/http"
-	"os"
+
+	"wallet-service/internal/config"
+	"wallet-service/internal/database"
+	walletHttp "wallet-service/internal/delivery/http"
+	"wallet-service/internal/domain"
+	"wallet-service/internal/repository/mysql"
+	"wallet-service/internal/usecase"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8082"
+	// 1. Muat konfigurasi lingkungan
+	cfg := config.LoadConfig()
+
+	// 2. Hubungkan ke MySQL
+	db, err := database.InitMySQL(cfg.DB_DSN)
+	if err != nil {
+		log.Fatalf("Gagal terhubung ke database: %v", err)
 	}
 
-	r := chi.NewRouter()
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("wallet-service is healthy"))
-	})
+	// 3. Auto-Migrate tabel (Wallet & Transaction)
+	err = db.AutoMigrate(&domain.Wallet{}, &domain.Transaction{})
+	if err != nil {
+		log.Fatalf("Gagal auto-migrate: %v", err)
+	}
 
-	fmt.Printf("Wallet Service starting on port %s...\n", port)
-	if err := http.ListenAndServe(":"+port, r); err != nil {
-		fmt.Printf("Error starting server: %v\n", err)
+	// 4. Inisialisasi Repositori
+	walletRepo := mysql.NewWalletRepository(db)
+	transactionRepo := mysql.NewTransactionRepository(db)
+
+	// 5. Inisialisasi Usecase
+	transactor := mysql.NewTransactor(db)
+	walletUC := usecase.NewWalletUsecase(walletRepo, transactionRepo, transactor)
+
+	// 6. Setup Router utama
+	r := chi.NewRouter()
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+
+	// 7. Daftarkan Handler
+	walletHttp.NewWalletHandler(r, walletUC, cfg.JWTSecret)
+
+	// 8. Nyalakan Server
+	log.Printf("Wallet Service (Modul 2) berjalan di port %s", cfg.Port)
+	if err := http.ListenAndServe(":"+cfg.Port, r); err != nil {
+		log.Fatalf("Server berhenti: %v", err)
 	}
 }
